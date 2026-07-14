@@ -154,10 +154,6 @@ const swaggerOptions = {
                 url: 'https://api.tsotchke.net',
                 description: 'Production',
             },
-            {
-                url: 'http://localhost:3000',
-                description: 'Local development',
-            },
         ],
         tags: [
             { name: 'System', description: 'Runtime status and provenance' },

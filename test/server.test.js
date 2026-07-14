@@ -107,6 +107,12 @@ test('exposes OpenAPI and returns structured 404 errors', async () => {
     const openapi = await request('/v1/openapi.json');
     assert.equal(openapi.response.status, 200);
     assert.equal(openapi.body.openapi, '3.0.3');
+    assert.deepEqual(openapi.body.servers, [
+        {
+            url: 'https://api.tsotchke.net',
+            description: 'Production',
+        },
+    ]);
 
     const missing = await request('/does-not-exist');
     assert.equal(missing.response.status, 404);
