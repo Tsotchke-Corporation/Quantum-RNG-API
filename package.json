@@ -1,26 +1,42 @@
 {
   "name": "quantum-rng-api",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "private": true,
+  "description": "REST API for the Bell-verified quantum_rng v3 simulation engine",
   "main": "server.js",
   "scripts": {
+    "build": "node-gyp rebuild",
+    "clean": "node-gyp clean",
     "start": "node server.js",
-    "build": "node-gyp configure && node-gyp rebuild",
-    "postinstall": "npm run build",
-    "prestart": "npm run build"
+    "test": "npm run build && node --test",
+    "postinstall": "npm run build"
   },
   "gypfile": true,
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "Quantum RNG REST API",
+  "keywords": [
+    "random-number-generator",
+    "quantum-simulation",
+    "entropy",
+    "node-api",
+    "rest-api"
+  ],
+  "author": "Tsotchke Corporation",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tsotchke-Corporation/Quantum-RNG-API.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Tsotchke-Corporation/Quantum-RNG-API/issues"
+  },
+  "homepage": "https://github.com/Tsotchke-Corporation/Quantum-RNG-API#readme",
   "dependencies": {
-    "express": "^4.18.2",
-    "node-addon-api": "^6.1.0",
-    "node-gyp": "^9.4.0",
-    "swagger-jsdoc": "^6.2.8",
+    "express": "^5.2.1",
+    "node-addon-api": "^8.9.0",
+    "node-gyp": "^12.4.0",
+    "swagger-jsdoc": "^6.3.0",
     "swagger-ui-express": "^5.0.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.17.0"
   }
 }
