@@ -26,3 +26,28 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm test
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag quantum-rng-api:ci .
+      - run: docker run --detach --name quantum-rng-api --publish 127.0.0.1:8080:8080 quantum-rng-api:ci
+      - name: Verify production container
+        run: |
+          for attempt in {1..60}; do
+            if response="$(curl --fail --silent http://127.0.0.1:8080/v1/health)"; then
+              HEALTH_RESPONSE="$response" node - <<'NODE'
+          const health = JSON.parse(process.env.HEALTH_RESPONSE);
+          if (health.status !== 'ok') throw new Error(`unexpected status: ${health.status}`);
+          if (health.apiVersion !== '2.0.0') throw new Error(`unexpected API version: ${health.apiVersion}`);
+          if (health.engine?.name !== 'quantum_rng_v3') throw new Error(`unexpected engine: ${health.engine?.name}`);
+          NODE
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs quantum-rng-api
+          exit 1
