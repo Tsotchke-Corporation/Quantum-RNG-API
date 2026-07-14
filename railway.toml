@@ -1,10 +1,9 @@
 [build]
-builder = "nixpacks"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "npm start"
 healthcheckPath = "/v1/health"
 healthcheckTimeout = 100
-
-[nixpacks]
-pkgs = ["python3", "make", "gcc"]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

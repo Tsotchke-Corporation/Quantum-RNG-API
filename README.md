@@ -140,10 +140,14 @@ portable SIMD/scalar paths.
 
 ## Deployment
 
-`railway.toml` supplies the Railway build packages, start command, and
-`/v1/health` probe. A production deployment must place an authenticated,
-rate-limited TLS gateway in front of this process when the output is used by
-untrusted clients or security-sensitive systems.
+Railway builds the root `Dockerfile` with Node.js 22 and deploys `master`
+automatically after the GitHub Actions check suite passes. `railway.toml`
+defines the Docker builder, `/v1/health` probe, and restart policy. CI builds
+and starts the same production image before a change can reach production.
+
+A production deployment must place an authenticated, rate-limited TLS gateway
+in front of this process when the output is used by untrusted clients or
+security-sensitive systems.
 
 The service starts only after the native engine initializes. Unless disabled,
 it also requires the startup CHSH simulation check to exceed the classical

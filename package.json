@@ -7,9 +7,9 @@
   "scripts": {
     "build": "node-gyp rebuild",
     "clean": "node-gyp clean",
+    "install": "npm run build",
     "start": "node server.js",
-    "test": "npm run build && node --test",
-    "postinstall": "npm run build"
+    "test": "npm run build && node --test"
   },
   "gypfile": true,
   "keywords": [

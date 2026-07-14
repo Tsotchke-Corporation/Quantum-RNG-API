@@ -13,3 +13,6 @@ yarn-error.log*
 # Environment variables
 .env
 .env.local
+
+# Local Railway project link
+.railway/
