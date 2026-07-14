@@ -1,403 +1,514 @@
+'use strict';
+
 const express = require('express');
-const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
+const packageMetadata = require('./package.json');
 
-let QuantumRNG;
+const { QuantumRNG } = require('./build/Release/quantum_rng.node');
 
-// Swagger definition
+const API_VERSION = packageMetadata.version;
+const MAX_BYTES_PER_REQUEST = 4096;
+const MAX_CHOICE_ITEMS = 100000;
+const UINT64_MAX = (1n << 64n) - 1n;
+const PORT = parsePort(process.env.PORT || '3000');
+const HOST = process.env.HOST || '0.0.0.0';
+const QRNG_MODE = parseMode(process.env.QRNG_MODE || 'direct');
+const VERIFY_ON_START = process.env.QRNG_VERIFY_ON_START !== '0';
+const VERIFY_MEASUREMENTS = parseVerificationMeasurements(
+    process.env.QRNG_VERIFY_MEASUREMENTS || '4000'
+);
+
+class ClientError extends Error {
+    constructor(message, status = 400) {
+        super(message);
+        this.name = 'ClientError';
+        this.status = status;
+    }
+}
+
+function parsePort(value) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+        throw new Error('PORT must be an integer between 0 and 65535');
+    }
+    return parsed;
+}
+
+function parseMode(value) {
+    if (!['direct', 'grover', 'bell-verified'].includes(value)) {
+        throw new Error('QRNG_MODE must be direct, grover, or bell-verified');
+    }
+    return value;
+}
+
+function parseVerificationMeasurements(value) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1000 || parsed > 100000) {
+        throw new Error(
+            'QRNG_VERIFY_MEASUREMENTS must be an integer between 1000 and 100000'
+        );
+    }
+    return parsed;
+}
+
+function parseInteger(value, name, min, max) {
+    if (typeof value !== 'string' || !/^-?\d+$/.test(value)) {
+        throw new ClientError(`${name} must be an integer`);
+    }
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+        throw new ClientError(`${name} must be between ${min} and ${max}`);
+    }
+    return parsed;
+}
+
+function parseUInt64(value, name) {
+    if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+        throw new ClientError(`${name} must be an unsigned decimal integer`);
+    }
+    const parsed = BigInt(value);
+    if (parsed > UINT64_MAX) {
+        throw new ClientError(`${name} must be at most 18446744073709551615`);
+    }
+    return parsed;
+}
+
+function parseProbability(value) {
+    if (value === undefined) return 0.5;
+    if (typeof value !== 'string' || value.trim() === '') {
+        throw new ClientError('probability must be a number between 0 and 1');
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+        throw new ClientError('probability must be a number between 0 and 1');
+    }
+    return parsed;
+}
+
+function serializeStats(stats) {
+    return Object.fromEntries(
+        Object.entries(stats).map(([key, value]) => [
+            key,
+            typeof value === 'bigint' ? value.toString() : value,
+        ])
+    );
+}
+
+function engineMetadata(rngInstance) {
+    return {
+        name: 'quantum_rng_v3',
+        release: QuantumRNG.getVersion(),
+        engineVersion: QuantumRNG.getEngineVersion(),
+        revision: QuantumRNG.getRevision(),
+        mode: rngInstance.getMode(),
+    };
+}
+
+function runStartupVerification(rngInstance) {
+    if (!VERIFY_ON_START) {
+        return {
+            performed: false,
+            scope: 'quantum-state simulation model',
+            reason: 'disabled by QRNG_VERIFY_ON_START=0',
+        };
+    }
+
+    const result = rngInstance.verifyQuantum(VERIFY_MEASUREMENTS);
+    if (!result.violatesClassical) {
+        throw new Error(
+            `QRNG v3 startup CHSH verification failed: S=${result.chsh}`
+        );
+    }
+
+    return {
+        performed: true,
+        scope: 'quantum-state simulation model',
+        ...result,
+    };
+}
+
+const rng = new QuantumRNG({
+    mode: QRNG_MODE,
+    bellMonitoring: QRNG_MODE === 'bell-verified',
+});
+const startupVerification = runStartupVerification(rng);
+
 const swaggerOptions = {
     definition: {
-        openapi: '3.0.0',
+        openapi: '3.0.3',
         info: {
-            title: 'Quantum RNG API',
-            version: '1.0.0',
-            description: 'A REST API for generating true random numbers using quantum mechanics',
+            title: 'Tsotchke Quantum RNG API',
+            version: API_VERSION,
+            description:
+                'HTTP interface to the quantum_rng v3 state-vector simulation engine. ' +
+                'Output is conditioned with health-tested operating-system and CPU entropy. ' +
+                'CHSH verification validates the simulation model; it is not a claim of physical quantum hardware.',
             license: {
-                name: 'ISC',
-                url: 'https://opensource.org/licenses/ISC',
+                name: 'MIT',
+                url: 'https://opensource.org/license/mit',
             },
         },
         servers: [
             {
                 url: 'https://api.tsotchke.net',
-                description: 'Production server',
+                description: 'Production',
+            },
+            {
+                url: 'http://localhost:3000',
+                description: 'Local development',
             },
         ],
+        tags: [
+            { name: 'System', description: 'Runtime status and provenance' },
+            { name: 'Random', description: 'Random data generation' },
+        ],
     },
-    apis: ['./server.js'], // files containing annotations
+    apis: ['./server.js'],
 };
 
-const swaggerDocs = swaggerJsdoc(swaggerOptions);
+const swaggerDocument = swaggerJsdoc(swaggerOptions);
 
-try {
-    console.log('Current directory:', process.cwd());
-    console.log('Attempting to load quantum_rng module...');
-    const quantum_rng = require('./build/Release/quantum_rng.node');
-    console.log('Module loaded:', quantum_rng);
-    QuantumRNG = quantum_rng.QuantumRNG;
-    console.log('QuantumRNG constructor:', QuantumRNG);
-} catch (err) {
-    console.error('Failed to load quantum_rng module:', err);
-    process.exit(1);
+function createApp({ rngInstance = rng, verification = startupVerification } = {}) {
+    const app = express();
+    app.disable('x-powered-by');
+    app.use(express.json({ limit: '256kb' }));
+
+    app.get('/', (req, res) => {
+        res.json({
+            name: 'Tsotchke Quantum RNG API',
+            apiVersion: API_VERSION,
+            engine: engineMetadata(rngInstance),
+            documentation: '/v1/docs',
+            source: 'https://github.com/Tsotchke-Corporation/Quantum-RNG-API',
+        });
+    });
+
+    const v1 = express.Router();
+    v1.get('/openapi.json', (req, res) => res.json(swaggerDocument));
+    v1.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+    /**
+     * @swagger
+     * /v1/health:
+     *   get:
+     *     summary: Get runtime health, provenance, verification, and counters
+     *     tags: [System]
+     *     responses:
+     *       200:
+     *         description: The generator is initialized and operational
+     */
+    v1.get('/health', (req, res) => {
+        res.json({
+            status: 'ok',
+            apiVersion: API_VERSION,
+            engine: engineMetadata(rngInstance),
+            verification,
+            stats: serializeStats(rngInstance.getStats()),
+        });
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/stats:
+     *   get:
+     *     summary: Get QRNG v3 generation and simulation counters
+     *     tags: [System]
+     *     responses:
+     *       200:
+     *         description: Current engine counters
+     */
+    v1.get('/qrng/stats', (req, res) => {
+        res.json({
+            engine: engineMetadata(rngInstance),
+            stats: serializeStats(rngInstance.getStats()),
+        });
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/verification:
+     *   get:
+     *     summary: Get the startup CHSH simulation-verification result
+     *     tags: [System]
+     *     responses:
+     *       200:
+     *         description: Startup verification result and its scope
+     */
+    v1.get('/qrng/verification', (req, res) => {
+        res.json(verification);
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/bytes/{count}:
+     *   get:
+     *     summary: Generate random bytes
+     *     tags: [Random]
+     *     parameters:
+     *       - in: path
+     *         name: count
+     *         required: true
+     *         schema:
+     *           type: integer
+     *           minimum: 1
+     *           maximum: 4096
+     *     responses:
+     *       200:
+     *         description: Hex, Base64, and byte-array encodings of one draw
+     *       400:
+     *         description: Invalid count
+     */
+    v1.get('/qrng/bytes/:count', (req, res, next) => {
+        try {
+            const count = parseInteger(
+                req.params.count,
+                'count',
+                1,
+                MAX_BYTES_PER_REQUEST
+            );
+            const bytes = rngInstance.getBytes(count);
+            res.json({
+                length: bytes.length,
+                bytes: bytes.toString('hex'),
+                base64: bytes.toString('base64'),
+                raw: Array.from(bytes),
+            });
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/number:
+     *   get:
+     *     summary: Generate a floating-point or unsigned 64-bit value
+     *     tags: [Random]
+     *     parameters:
+     *       - in: query
+     *         name: type
+     *         schema:
+     *           type: string
+     *           enum: [float, uint64]
+     *           default: float
+     *     responses:
+     *       200:
+     *         description: Generated value; uint64 values are decimal strings
+     *       400:
+     *         description: Invalid type
+     */
+    v1.get('/qrng/number', (req, res, next) => {
+        try {
+            const type = req.query.type || 'float';
+            if (type === 'float') {
+                return res.json({ type, value: rngInstance.getDouble() });
+            }
+            if (type === 'uint64') {
+                return res.json({ type, value: rngInstance.getUInt64().toString() });
+            }
+            throw new ClientError('type must be float or uint64');
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/range:
+     *   get:
+     *     summary: Generate an unbiased signed 32-bit integer in an inclusive range
+     *     tags: [Random]
+     *     parameters:
+     *       - in: query
+     *         name: min
+     *         required: true
+     *         schema: { type: integer, minimum: -2147483648, maximum: 2147483647 }
+     *       - in: query
+     *         name: max
+     *         required: true
+     *         schema: { type: integer, minimum: -2147483648, maximum: 2147483647 }
+     *     responses:
+     *       200:
+     *         description: Generated signed integer
+     *       400:
+     *         description: Invalid range
+     */
+    v1.get('/qrng/range', (req, res, next) => {
+        try {
+            const min = parseInteger(
+                req.query.min,
+                'min',
+                -2147483648,
+                2147483647
+            );
+            const max = parseInteger(
+                req.query.max,
+                'max',
+                -2147483648,
+                2147483647
+            );
+            if (min > max) throw new ClientError('min must not exceed max');
+            res.json({ min, max, value: rngInstance.getRange32(min, max) });
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/range64:
+     *   get:
+     *     summary: Generate an unbiased unsigned 64-bit integer in an inclusive range
+     *     tags: [Random]
+     *     parameters:
+     *       - in: query
+     *         name: min
+     *         required: true
+     *         schema: { type: string, pattern: '^\\d+$' }
+     *       - in: query
+     *         name: max
+     *         required: true
+     *         schema: { type: string, pattern: '^\\d+$' }
+     *     responses:
+     *       200:
+     *         description: Generated unsigned integer as a decimal string
+     *       400:
+     *         description: Invalid range
+     */
+    v1.get('/qrng/range64', (req, res, next) => {
+        try {
+            const min = parseUInt64(req.query.min, 'min');
+            const max = parseUInt64(req.query.max, 'max');
+            if (min > max) throw new ClientError('min must not exceed max');
+            res.json({
+                min: min.toString(),
+                max: max.toString(),
+                value: rngInstance.getRange64(min, max).toString(),
+            });
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/boolean:
+     *   get:
+     *     summary: Generate a boolean with a requested true probability
+     *     tags: [Random]
+     *     parameters:
+     *       - in: query
+     *         name: probability
+     *         schema: { type: number, minimum: 0, maximum: 1, default: 0.5 }
+     *     responses:
+     *       200:
+     *         description: Generated boolean
+     *       400:
+     *         description: Invalid probability
+     */
+    v1.get('/qrng/boolean', (req, res, next) => {
+        try {
+            const probability = parseProbability(req.query.probability);
+            const value = rngInstance.getDouble() < probability;
+            res.json({ probability, value });
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    /**
+     * @swagger
+     * /v1/qrng/choice:
+     *   post:
+     *     summary: Select one element from a non-empty JSON array
+     *     tags: [Random]
+     *     requestBody:
+     *       required: true
+     *       content:
+     *         application/json:
+     *           schema:
+     *             type: object
+     *             required: [array]
+     *             properties:
+     *               array:
+     *                 type: array
+     *                 minItems: 1
+     *                 maxItems: 100000
+     *                 items: {}
+     *     responses:
+     *       200:
+     *         description: Selected element and its exact unbiased index
+     *       400:
+     *         description: Invalid request body
+     */
+    v1.post('/qrng/choice', (req, res, next) => {
+        try {
+            const { array } = req.body || {};
+            if (!Array.isArray(array) || array.length === 0) {
+                throw new ClientError('array must be non-empty');
+            }
+            if (array.length > MAX_CHOICE_ITEMS) {
+                throw new ClientError(`array must contain at most ${MAX_CHOICE_ITEMS} items`);
+            }
+            const index = Number(
+                rngInstance.getRange64(0n, BigInt(array.length - 1))
+            );
+            res.json({ index, value: array[index] });
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    app.use('/v1', v1);
+
+    app.use((req, res) => {
+        res.status(404).json({ error: 'Not found' });
+    });
+
+    app.use((error, req, res, next) => {
+        if (res.headersSent) return next(error);
+        if (error instanceof ClientError) {
+            return res.status(error.status).json({ error: error.message });
+        }
+        console.error(error);
+        return res.status(500).json({ error: 'Internal server error' });
+    });
+
+    return app;
 }
 
-const app = express();
-app.use(express.json());
+const app = createApp();
 
-// Initialize quantum RNG
-console.log('Initializing QuantumRNG instance...');
-const rng = new QuantumRNG();
-console.log('QuantumRNG instance created successfully');
+function startServer(port = PORT, host = HOST) {
+    const server = app.listen(port, host, () => {
+        const address = server.address();
+        const boundPort = typeof address === 'object' && address ? address.port : port;
+        console.log(`Tsotchke Quantum RNG API ${API_VERSION} listening on ${host}:${boundPort}`);
+        console.log(
+            `Engine ${QuantumRNG.getVersion()} (${QuantumRNG.getRevision().slice(0, 7)}), mode ${rng.getMode()}`
+        );
+        if (startupVerification.performed) {
+            console.log(
+                `Startup CHSH simulation verification: S=${startupVerification.chsh.toFixed(4)}`
+            );
+        }
+    });
+    return server;
+}
 
-// Add boolean and choice functions to rng object
-rng.boolean = function(probability = 0.5) {
-    return this.getDouble() < probability;
+if (require.main === module) {
+    startServer();
+}
+
+module.exports = {
+    API_VERSION,
+    MAX_BYTES_PER_REQUEST,
+    app,
+    createApp,
+    engineMetadata,
+    rng,
+    serializeStats,
+    startServer,
+    startupVerification,
 };
-
-rng.choice = function(array) {
-    if (!Array.isArray(array) || array.length === 0) {
-        throw new Error('Array must be non-empty');
-    }
-    const index = Math.floor(this.getDouble() * array.length);
-    return array[index];
-};
-
-// Welcome message
-app.get('/', (req, res) => {
-    res.json({
-        message: 'Welcome to the Quantum RNG API',
-        version: '1.0.0',
-        documentation: 'https://api.tsotchke.net/v1/docs'
-    });
-});
-
-// API v1 router
-const v1Router = express.Router();
-
-// Swagger UI
-v1Router.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
-
-/**
- * @swagger
- * /v1/health:
- *   get:
- *     summary: Health check endpoint
- *     description: Returns the API status, version, and current entropy estimate
- *     tags: [System]
- *     responses:
- *       200:
- *         description: System health information
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 status:
- *                   type: string
- *                   example: ok
- *                 version:
- *                   type: string
- *                   example: 1.0.0
- *                 entropy:
- *                   type: number
- *                   example: 8.2
- */
-v1Router.get('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        version: QuantumRNG.getVersion(),
-        entropy: rng.getEntropyEstimate()
-    });
-});
-
-/**
- * @swagger
- * /v1/qrng/bytes/{count}:
- *   get:
- *     summary: Get random bytes
- *     description: Returns the specified number of random bytes
- *     tags: [Random]
- *     parameters:
- *       - in: path
- *         name: count
- *         required: true
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 1024
- *         description: Number of random bytes to generate
- *     responses:
- *       200:
- *         description: Random bytes in hex and raw format
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 bytes:
- *                   type: string
- *                   description: Hex string representation of random bytes
- *                 raw:
- *                   type: array
- *                   items:
- *                     type: integer
- *       400:
- *         description: Invalid count parameter
- *       500:
- *         description: Server error
- */
-v1Router.get('/qrng/bytes/:count', (req, res) => {
-    try {
-        const count = parseInt(req.params.count);
-        if (isNaN(count) || count <= 0 || count > 1024) {
-            return res.status(400).json({
-                error: 'Count must be a number between 1 and 1024'
-            });
-        }
-        
-        const bytes = rng.getBytes(count);
-        res.json({
-            bytes: bytes.toString('hex'),
-            raw: Array.from(bytes)
-        });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * @swagger
- * /v1/qrng/number:
- *   get:
- *     summary: Get random number
- *     description: Returns a random number in either float or uint64 format
- *     tags: [Random]
- *     parameters:
- *       - in: query
- *         name: type
- *         schema:
- *           type: string
- *           enum: [float, uint64]
- *           default: float
- *         description: Type of random number to generate
- *     responses:
- *       200:
- *         description: Random number
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 value:
- *                   oneOf:
- *                     - type: number
- *                     - type: string
- *       400:
- *         description: Invalid type parameter
- *       500:
- *         description: Server error
- */
-v1Router.get('/qrng/number', (req, res) => {
-    try {
-        const { type = 'float' } = req.query;
-        
-        let result;
-        switch (type) {
-            case 'float':
-                result = rng.getDouble();
-                break;
-            case 'uint64':
-                // Convert BigInt to string for JSON serialization
-                result = rng.getUInt64().toString();
-                break;
-            default:
-                return res.status(400).json({
-                    error: 'Type must be either "float" or "uint64"'
-                });
-        }
-        
-        res.json({ value: result });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * @swagger
- * /v1/qrng/range:
- *   get:
- *     summary: Get random number in range
- *     description: Returns a random integer within the specified range
- *     tags: [Random]
- *     parameters:
- *       - in: query
- *         name: min
- *         required: true
- *         schema:
- *           type: integer
- *         description: Minimum value (inclusive)
- *       - in: query
- *         name: max
- *         required: true
- *         schema:
- *           type: integer
- *         description: Maximum value (inclusive)
- *     responses:
- *       200:
- *         description: Random number within range
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 value:
- *                   type: integer
- *       400:
- *         description: Invalid parameters
- *       500:
- *         description: Server error
- */
-v1Router.get('/qrng/range', (req, res) => {
-    try {
-        const min = parseInt(req.query.min);
-        const max = parseInt(req.query.max);
-        
-        if (isNaN(min) || isNaN(max)) {
-            return res.status(400).json({
-                error: 'Min and max must be numbers'
-            });
-        }
-        
-        if (min > max) {
-            return res.status(400).json({
-                error: 'Min must be less than or equal to max'
-            });
-        }
-        
-        const value = rng.getRange32(min, max);
-        res.json({ value });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * @swagger
- * /v1/qrng/boolean:
- *   get:
- *     summary: Get random boolean
- *     description: Returns a random boolean with specified probability of being true
- *     tags: [Random]
- *     parameters:
- *       - in: query
- *         name: probability
- *         schema:
- *           type: number
- *           minimum: 0
- *           maximum: 1
- *           default: 0.5
- *         description: Probability of returning true
- *     responses:
- *       200:
- *         description: Random boolean
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 value:
- *                   type: boolean
- *       400:
- *         description: Invalid probability parameter
- *       500:
- *         description: Server error
- */
-v1Router.get('/qrng/boolean', (req, res) => {
-    try {
-        const probability = parseFloat(req.query.probability) || 0.5;
-        
-        if (probability < 0 || probability > 1) {
-            return res.status(400).json({
-                error: 'Probability must be between 0 and 1'
-            });
-        }
-        
-        const value = rng.boolean(probability);
-        res.json({ value });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-/**
- * @swagger
- * /v1/qrng/choice:
- *   post:
- *     summary: Get random array element
- *     description: Returns a random element from the provided array
- *     tags: [Random]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - array
- *             properties:
- *               array:
- *                 type: array
- *                 items:
- *                   type: string
- *                 minItems: 1
- *                 example: ["apple", "banana", "orange"]
- *     responses:
- *       200:
- *         description: Random element from array
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 value:
- *                   type: any
- *       400:
- *         description: Invalid request body
- *       500:
- *         description: Server error
- */
-v1Router.post('/qrng/choice', (req, res) => {
-    try {
-        const { array } = req.body;
-        
-        if (!Array.isArray(array) || array.length === 0) {
-            return res.status(400).json({
-                error: 'Request body must contain a non-empty array'
-            });
-        }
-        
-        const value = rng.choice(array);
-        res.json({ value });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Mount v1 router
-app.use('/v1', v1Router);
-
-// Error handler
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({
-        error: 'Internal server error',
-        message: err.message
-    });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Quantum RNG API server running on port ${PORT}`);
-    console.log(`Version: ${QuantumRNG.getVersion()}`);
-    console.log(`Current entropy estimate: ${rng.getEntropyEstimate()}`);
-});
